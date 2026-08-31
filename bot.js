@@ -1,15 +1,10 @@
 const TelegramBot = require("node-telegram-bot-api");
 const https = require("https");
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const API_KEY = process.env.NROUTER_API_KEY;
+const BOT_TOKEN = "8768540984:AAGWX9yJQwaZExHKH0dCSRwKQpB4cK9tJxo";
+const API_KEY = "sk-a060f5243df9ce04-dr5klf-b32b06b6";
 const API_URL = "https://trustworthy-solace-production-068d.up.railway.app/v1/chat/completions";
 const MODEL = "ssd";
-
-if (!BOT_TOKEN || !API_KEY) {
-  console.error("Set TELEGRAM_BOT_TOKEN and NROUTER_API_KEY env vars");
-  process.exit(1);
-}
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const conversations = new Map();
@@ -30,9 +25,11 @@ function chat(messages) {
         },
       },
       (res) => {
+        console.log("Status:", res.statusCode);
         let data = "";
         res.on("data", (c) => (data += c));
         res.on("end", () => {
+          console.log("Full response:", data.substring(0, 500));
           try {
             const json = JSON.parse(data);
             if (json.choices && json.choices[0]) {
