@@ -38,9 +38,11 @@ function chat(messages) {
             if (json.choices && json.choices[0]) {
               resolve(json.choices[0].message.content);
             } else {
+              console.error("API response:", data);
               reject(new Error(json.error?.message || "Unknown API error"));
             }
           } catch (e) {
+            console.error("Raw response:", data);
             reject(e);
           }
         });
@@ -81,8 +83,8 @@ bot.on("message", async (msg) => {
       ...history,
     ]);
     history.push({ role: "assistant", content: reply });
-    await bot.sendMessage(chatId, reply, { parse_mode: "Markdown" }).catch(() =>
-      bot.sendMessage(chatId, reply)
+    await bot.sendMessage(chatId, reply).catch((e) =>
+      console.error("Send error:", e.message)
     );
   } catch (err) {
     console.error("API error:", err.message);
