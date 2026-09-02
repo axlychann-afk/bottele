@@ -107,14 +107,20 @@ def db_add_message(user_id: int, role: str, content: str):
         """, (user_id, user_id, MAX_HISTORY))
 
 
-def db_get_history(user_id: int, limit: int = MAX_HISTORY) -> list[dict]:
+def db_get_history(user_id: int, limit: int = MAX_HISTORY, cap: int = 2000) -> list[dict]:
+    """return history buat dikirim ke AI. cap per-message biar token gak bocor."""
     with DB_LOCK, sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT role, content FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
             (user_id, limit),
         ).fetchall()
     rows.reverse()
-    return [{"role": r, "content": c} for r, c in rows]
+    out = []
+    for r, c in rows:
+        if len(c) > cap:
+            c = c[:cap] + "..."
+        out.append({"role": r, "content": c})
+    return out
 
 
 def db_reset_user(user_id: int):
@@ -401,7 +407,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     history = db_get_history(uid)
     # kirim typing indicator biar user tau bot lagi proses
     try:
-        await ctx.chat.send_action("typing")
+        await ctx.bot.send_chat_action(chat_id=msg.chat_id, action="typing")
     except Exception:
         pass
     try:
@@ -458,9 +464,8 @@ def main():
     app.add_handler(CommandHandler("me", me_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("resetpool", reset_pool_cmd))
-    app.add_handler(MessageHandler(filters.PHOTO, on_text))
-    app.add_handler(MessageHandler(filters.Document(), on_text))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    # satu handler all-in. skip COMMAND biar /start dll kena CommandHandler dulu.
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, on_text))
     app.run_polling()
 
 
