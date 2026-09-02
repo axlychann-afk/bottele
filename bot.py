@@ -150,7 +150,7 @@ TEXT_MIME_PREFIX = ("text/", "application/json", "application/xml",
                     "application/javascript", "application/x-yaml",
                     "application/x-shellscript")
 
-client = httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10))
+client = httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10))
 
 
 # model tier-1 yg punya vision (untuk image input dari user).
@@ -326,9 +326,13 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if msg.photo:
         has_image = True
         smallest = msg.photo[-1]
-        data = await download_telegram_file(ctx.bot, smallest.file_id)
-        b64 = __import__("base64").b64encode(data).decode()
-        parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        try:
+            data = await download_telegram_file(ctx.bot, smallest.file_id)
+            b64 = __import__("base64").b64encode(data).decode()
+            parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        except Exception as e:
+            await msg.reply_text(f"err download photo: {e}")
+            return
 
     doc = msg.document
     if doc and not has_image:
@@ -341,7 +345,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             data = await download_telegram_file(ctx.bot, doc.file_id)
         except Exception as e:
-            await msg.reply_text(f"gagal download: {e}")
+            await msg.reply_text(f"err download doc: {e}")
             return
         # image document -> vision
         if mime and mime.startswith("image/"):
@@ -440,7 +444,7 @@ def main():
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("resetpool", reset_pool_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, on_text))
-    app.add_handler(MessageHandler(filters.Document.ALL, on_text))
+    app.add_handler(MessageHandler(filters.Document(), on_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.run_polling()
 
