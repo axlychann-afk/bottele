@@ -47,8 +47,10 @@ QUOTA_PHRASES = ("can only try", "free quota", "topup", "recharged")
 SKIP_STATUS = {401, 403}
 
 MAX_HISTORY = 20
-MAX_TEXT_FILE = 200_000  # 200KB cap untuk text file
-MAX_FILE_DOWNLOAD = 19_000_000  # 19MB (Telegram Bot API limit 20MB)
+MAX_TEXT_FILE = 18_000_000  # 18MB per text file (samain dg Telegram limit)
+MAX_FILE_DOWNLOAD = 19_000_000  # 19MB cap (Telegram Bot API limit 20MB)
+MAX_ZIP_ENTRIES = 50  # max file di-extract dari zip
+MAX_ZIP_ENTRY_SIZE = 2_000_000  # 2MB per entry di dalam zip
 histories: dict[int, list[dict]] = {}
 fail_counts: dict[str, int] = {}
 
@@ -121,6 +123,60 @@ def _format_binary_user_msg(data: bytes, filename: str, mime: str | None) -> str
         sample = preview.hex()
     b64 = __import__("base64").b64encode(preview).decode()
     return f"{head}\nfile ini binary, parser khusus belum ada. preview hex:\n```\n{preview.hex()[:512]}\n```\nbase64 (512 byte pertama):\n{b64[:256]}...\ntext-safe:\n```\n{sample}\n```"
+
+
+def _extract_zip_text(data: bytes, zip_name: str) -> tuple[str, str | None]:
+    """return (user_msg, err). kalau err != None, msg gagal."""
+    import io, zipfile
+    head = f"[archive: {zip_name}, {len(data)} bytes]"
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return "", "file ini bukan zip valid."
+    files = zf.namelist()
+    if not files:
+        return "", "zip kosong."
+    listing = ", ".join(files[:MAX_ZIP_ENTRIES])
+    if len(files) > MAX_ZIP_ENTRIES:
+        listing += f" ... (+{len(files)-MAX_ZIP_ENTRIES} more)"
+    chunks = [head, f"entries ({len(files)}): {listing}", ""]
+    read_count = 0
+    skipped = []
+    for name in files[:MAX_ZIP_ENTRIES]:
+        try:
+            info = zf.getinfo(name)
+            if info.is_dir():
+                continue
+            if info.file_size > MAX_ZIP_ENTRY_SIZE:
+                skipped.append(f"{name} ({info.file_size//1024}KB)")
+                continue
+            content = zf.read(name)
+            # decide text vs binary
+            try:
+                txt = content.decode("utf-8")
+                is_text = True
+            except UnicodeDecodeError:
+                txt = content.decode("latin-1", errors="replace")
+                # kalau banyak non-printable, treat as binary
+                printable = sum(1 for c in txt[:512] if 32 <= ord(c) < 127 or c in "\n\r\t")
+                is_text = (printable / max(1, len(txt[:512]))) > 0.85
+            if is_text:
+                truncated = len(txt) > MAX_ZIP_ENTRY_SIZE
+                txt = txt[:MAX_ZIP_ENTRY_SIZE]
+                chunks.append(f"--- {name} ---")
+                if truncated:
+                    txt += f"\n[... truncated at {MAX_ZIP_ENTRY_SIZE} chars]"
+                chunks.append(txt)
+                chunks.append("")
+                read_count += 1
+            else:
+                skipped.append(f"{name} (binary)")
+        except Exception as e:
+            skipped.append(f"{name} (err: {e})")
+    if skipped:
+        chunks.append(f"[skipped: {', '.join(skipped[:20])}]")
+    chunks.append(f"[read {read_count} text file(s) from archive]")
+    return "\n".join(chunks), None
 
 
 async def call_one(model: str, messages: list[dict], stream: bool = False):
@@ -207,6 +263,13 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             has_image = True
             b64 = __import__("base64").b64encode(data).decode()
             parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        # zip archive -> extract text entries
+        elif (fname or "").lower().endswith(".zip") or mime in ("application/zip", "application/x-zip-compressed"):
+            zip_msg, zip_err = _extract_zip_text(data, fname)
+            if zip_err:
+                await msg.reply_text(zip_err)
+                return
+            parts.append({"type": "text", "text": zip_msg})
         elif _is_text_file(fname, mime):
             try:
                 content = data.decode("utf-8", errors="replace")
