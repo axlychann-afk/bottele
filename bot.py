@@ -270,10 +270,17 @@ async def call_one(model: str, messages: list[dict], stream: bool = False):
 
 async def chat(messages: list[dict], prefer_vision: bool = False) -> tuple[str, str]:
     """pick dari tier-1 random; kalau gagal, lanjut tier-2; terakhir tier-3. Returns (text, model)."""
+    # kalau vision: hanya model yg punya vision capability. skip tier non-vision.
+    if prefer_vision:
+        tiers = ([m for m in TIER1 if m in VISION_PREFERRED], [], [])
+    else:
+        tiers = (TIER1, TIER2, TIER3)
     pool = VISION_POOL if prefer_vision else POOL
     tries_per_tier = 2
     last_err = ""
-    for tier in (TIER1, TIER2, TIER3):
+    for tier in tiers:
+        if not tier:
+            continue
         order = [m for m in tier if m in pool]
         random.shuffle(order)
         attempts = 0
@@ -392,10 +399,18 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db_add_message(uid, "user", save_content)
 
     history = db_get_history(uid)
+    # kirim typing indicator biar user tau bot lagi proses
+    try:
+        await ctx.chat.send_action("typing")
+    except Exception:
+        pass
     try:
         reply, used = await chat([{"role": "system", "content": SYSTEM}, *history], prefer_vision=has_image)
+    except RuntimeError as e:
+        await msg.reply_text(f"maaf, semua model gagal. coba lagi.\n{e}")
+        return
     except Exception as e:
-        await msg.reply_text(f"err: {e}")
+        await msg.reply_text(f"err: {type(e).__name__}: {e}")
         return
     db_add_message(uid, "assistant", reply)
     short = reply[:4000]
