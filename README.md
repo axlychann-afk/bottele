@@ -28,7 +28,7 @@ Push repo, set env vars:
 - `NINE_BASE` (default sudah benar)
 - `MODEL` (default `7/deepseek-v4-flash`)
 
-Procfile sudah ada (`worker: python bot.py`). Untuk Railway free plan, `worker` bisa idle-restart — kalau mau selalu hidup, pakai `web` (sudah ada `railway.json` dengan `web: python bot.py`).
+Procfile sudah ada (`worker: python bot.py`). Railway detect otomatis dari Procfile.
 
 Bot pakai pool 22 model (tested work dari key ini Sept 2026). Random pick tiap chat, fallback otomatis ke next kalau satu gagal. Model yg gagal 3x atau balas pesan "quota habis" diskip sementara.
 
