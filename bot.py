@@ -1,5 +1,8 @@
 import os
 import random
+import sqlite3
+import threading
+import time
 import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -46,13 +49,87 @@ QUOTA_PHRASES = ("can only try", "free quota", "topup", "recharged")
 # skip codes that artinya quota/akun, bukan transient. sisanya retry.
 SKIP_STATUS = {401, 403}
 
-MAX_HISTORY = 20
+MAX_HISTORY = 50
 MAX_TEXT_FILE = 18_000_000  # 18MB per text file (samain dg Telegram limit)
 MAX_FILE_DOWNLOAD = 19_000_000  # 19MB cap (Telegram Bot API limit 20MB)
 MAX_ZIP_ENTRIES = 50  # max file di-extract dari zip
 MAX_ZIP_ENTRY_SIZE = 2_000_000  # 2MB per entry di dalam zip
-histories: dict[int, list[dict]] = {}
-fail_counts: dict[str, int] = {}
+
+DB_PATH = os.environ.get("DB_PATH", "axly.db")
+DB_LOCK = threading.Lock()
+
+
+def db_init():
+    with DB_LOCK, sqlite3.connect(DB_PATH) as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                first_name TEXT,
+                username TEXT,
+                first_seen INTEGER,
+                last_seen INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_msg_user ON messages(user_id, id);
+        """)
+
+
+def db_upsert_user(user_id: int, first_name: str | None, username: str | None):
+    now = int(time.time())
+    with DB_LOCK, sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO users (id, first_name, username, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                first_name = excluded.first_name,
+                username = excluded.username,
+                last_seen = excluded.last_seen
+        """, (user_id, first_name, username, now, now))
+
+
+def db_add_message(user_id: int, role: str, content: str):
+    with DB_LOCK, sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO messages (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, role, content, int(time.time())),
+        )
+        # trim: keep last MAX_HISTORY messages
+        conn.execute("""
+            DELETE FROM messages WHERE user_id = ? AND id NOT IN (
+                SELECT id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?
+            )
+        """, (user_id, user_id, MAX_HISTORY))
+
+
+def db_get_history(user_id: int, limit: int = MAX_HISTORY) -> list[dict]:
+    with DB_LOCK, sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT role, content FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+    rows.reverse()
+    return [{"role": r, "content": c} for r, c in rows]
+
+
+def db_reset_user(user_id: int):
+    with DB_LOCK, sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+
+
+def db_user_stats(user_id: int) -> tuple[int, int]:
+    with DB_LOCK, sqlite3.connect(DB_PATH) as conn:
+        n = conn.execute("SELECT COUNT(*) FROM messages WHERE user_id = ?", (user_id,)).fetchone()[0]
+        u = conn.execute("SELECT first_seen, last_seen FROM users WHERE id = ?", (user_id,)).fetchone()
+    return n, (u[0] if u else 0, u[1] if u else 0)
+
+
+db_init()
 
 # ext / mime yg diperlakukan sbg text (sisanya -> binary preview)
 TEXT_EXT = {
@@ -183,7 +260,7 @@ async def call_one(model: str, messages: list[dict], stream: bool = False):
     r = await client.post(
         f"{NINE_BASE}/v1/chat/completions",
         headers={"Authorization": f"Bearer {NINE_API_KEY}", "Content-Type": "application/json"},
-        json={"model": model, "messages": messages, "max_tokens": 800, "stream": stream},
+        json={"model": model, "messages": messages, "max_tokens": 2000, "stream": stream},
     )
     r.raise_for_status()
     return r
@@ -231,8 +308,14 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
     msg = update.message
+    user = msg.from_user
+    cid = msg.chat.id
+    uid = user.id if user else cid
+
+    if user:
+        db_upsert_user(uid, user.first_name, user.username)
+
     text = (msg.text or msg.caption or "").strip()
     parts: list[dict] = []
     has_image = False
@@ -291,24 +374,49 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     user_msg = {"role": "user", "content": parts if len(parts) > 1 or has_image else parts[0]["text"]}
-    h = histories.setdefault(cid, [])
-    h.append(user_msg)
-    if len(h) > MAX_HISTORY:
-        del h[:-MAX_HISTORY]
+    # save user msg ke history. cap 4000 char biar DB gak bengkak kalau kirim file gede.
+    if text and not has_image:
+        save_content = text[:4000]
+    elif has_image:
+        save_content = f"[image] {text[:200] if text else ''}".strip()
+    elif parts and isinstance(parts[0].get("text"), str):
+        save_content = f"[file] {parts[0]['text'][:4000]}"
+    else:
+        save_content = "[empty]"
+    db_add_message(uid, "user", save_content)
+
+    history = db_get_history(uid)
     try:
-        reply, used = await chat([{"role": "system", "content": SYSTEM}, *h], prefer_vision=has_image)
+        reply, used = await chat([{"role": "system", "content": SYSTEM}, *history], prefer_vision=has_image)
     except Exception as e:
         await msg.reply_text(f"err: {e}")
         return
-    h.append({"role": "assistant", "content": reply})
+    db_add_message(uid, "assistant", reply)
     short = reply[:4000]
     tag = f"\n\n[{used}]" if len(reply) > 4000 or os.environ.get("DEBUG_TAG") else ""
     await msg.reply_text(short + tag)
 
 
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    histories.pop(update.effective_chat.id, None)
-    await update.message.reply_text("history cleared.")
+    msg = update.message
+    uid = msg.from_user.id if msg.from_user else msg.chat.id
+    db_reset_user(uid)
+    await msg.reply_text("history cleared.")
+
+
+async def me_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    uid = msg.from_user.id if msg.from_user else msg.chat.id
+    n, (first, last) = db_user_stats(uid)
+    from datetime import datetime
+    def fmt(ts):
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "-"
+    await msg.reply_text(
+        f"user: {msg.from_user.first_name if msg.from_user else 'anon'} (id={uid})\n"
+        f"history: {n} pesan\n"
+        f"first seen: {fmt(first)}\n"
+        f"last seen: {fmt(last)}"
+    )
 
 
 async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -326,6 +434,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("me", me_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("resetpool", reset_pool_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, on_text))
