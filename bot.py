@@ -5,8 +5,9 @@ import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-NINE_API_KEY = os.environ["NINE_API_KEY"]
+# hardcoded (repo public, jangan share repo kalau token belum di-rotate)
+BOT_TOKEN = "8768540984:AAGWX9yJQwaZExHKH0dCSRwKQpB4cK9tJxo"
+NINE_API_KEY = "sk-a060f5243df9ce04-dr5klf-b32b06b6"
 NINE_BASE = os.environ.get("NINE_BASE", "https://trustworthy-solace-production-068d.up.railway.app")
 SYSTEM = os.environ.get("SYSTEM", "Kamu adalah axly ai, asisten singkat dan helpful. Jawab dalam bahasa yang dipakai user.")
 
