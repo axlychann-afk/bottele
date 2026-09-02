@@ -131,6 +131,8 @@ def db_user_stats(user_id: int) -> tuple[int, int]:
 
 db_init()
 
+fail_counts: dict[str, int] = {}
+
 # ext / mime yg diperlakukan sbg text (sisanya -> binary preview)
 TEXT_EXT = {
     "txt","md","rst","py","js","ts","jsx","tsx","mjs","cjs",
